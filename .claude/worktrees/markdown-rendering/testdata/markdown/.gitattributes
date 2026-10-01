@@ -1,0 +1,2 @@
+# Corpus files are byte-exact test inputs (BOMs, UTF-16, CRLF, invalid UTF-8): no EOL conversion.
+* -text

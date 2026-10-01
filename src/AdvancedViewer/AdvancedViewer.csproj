@@ -1,0 +1,66 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>AdvancedViewer</AssemblyName>
+    <RootNamespace>AdvancedViewer</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Native AOT shared library (Total Commander Lister plugin) -->
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Every trim/AOT warning (IL2xxx/IL3xxx) is an error; nothing is suppressed. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <IlcTreatWarningsAsErrors>true</IlcTreatWarningsAsErrors>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+
+    <!-- Size-neutral defaults; no feature switches that hide warnings. -->
+    <OptimizationPreference>Speed</OptimizationPreference>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- GC inside a host process: workstation, non-concurrent (no background GC thread in TC). -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Cap the gen0 allocation budget at 4 MB, both its start size and its adaptive maximum
+         (values are hex, like DOTNET_GCgen0size / DOTNET_GCgen0MaxBudget).
+         By default the budget is sized from the CPU's L3 cache (about 12.5 MB on the test
+         machine), so private bytes climb by that much before the first GC runs, which looks
+         like a linear leak in TC's long-lived process. "System.GC.Gen0Size" as a
+         RuntimeHostConfigurationOption is NOT honoured by Native AOT (measured); the GC reads
+         its private key GCgen0size from the settings ILC embeds with runtimeopt
+         (the same mechanism the SDK uses for gcServer). -->
+    <IlcArg Include="--runtimeopt:GCgen0size=400000" />
+    <IlcArg Include="--runtimeopt:GCgen0MaxBudget=400000" />
+  </ItemGroup>
+
+  <!-- Throw-test variant: build.ps1 passes -p:SpikeThrow=true. Opening a file named
+       __throw__.bin then throws inside ListLoadW/ListLoadNextW so the catch-all is exercised.
+       Separate obj/bin dirs so the two variants never share ILC intermediates. -->
+  <PropertyGroup Condition="'$(SpikeThrow)' == 'true'">
+    <DefineConstants>$(DefineConstants);SPIKE_THROW</DefineConstants>
+    <IntermediateOutputPath>obj\throwtest\$(Configuration)\</IntermediateOutputPath>
+    <OutputPath>bin\throwtest\$(Configuration)\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.335">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

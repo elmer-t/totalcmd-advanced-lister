@@ -1,0 +1,3 @@
+# Invalid UTF-8
+
+Valid text, then invalid bytes: [Ã(ÿþ€] and an ANSI e-acute: [é] then valid again: cafÃ©.

@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Unit tests for the Markdown model, parser and text decoder on CoreCLR. The sources are
+       compiled in directly (no reference to the AOT plugin project, no Win32). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\AdvancedViewer\Markdown\Model\*.cs" Link="Shared\Model\%(Filename)%(Extension)" />
+    <Compile Include="..\AdvancedViewer\Markdown\MarkdownParser.cs" Link="Shared\MarkdownParser.cs" />
+    <Compile Include="..\AdvancedViewer\Markdown\TextDecoder.cs" Link="Shared\TextDecoder.cs" />
+    <Compile Include="..\AdvancedViewer\Markdown\ChunkSplitter.cs" Link="Shared\ChunkSplitter.cs" />
+    <None Include="corpus\**\*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Markdig" Version="1.4.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+bin/
+obj/
+out/
+artifacts/
+testfiles/
+*.user
+.vs/
+x64/
+Debug/
+Release/

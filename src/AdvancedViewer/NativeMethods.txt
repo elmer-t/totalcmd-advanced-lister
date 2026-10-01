@@ -1,0 +1,53 @@
+// Kernel32: file mapping, logging
+CreateFileW
+CreateFileMappingW
+MapViewOfFile
+UnmapViewOfFile
+CloseHandle
+GetFileSizeEx
+GetFileType
+GetTempPathW
+WriteFile
+MultiByteToWideChar
+GetModuleHandleExW
+GetCurrentProcessId
+
+// User32: window, input, scroll bar
+RegisterClassExW
+CreateWindowExW
+DestroyWindow
+DefWindowProcW
+GetClientRect
+SetWindowLongPtrW
+GetWindowLongPtrW
+PostMessageW
+InvalidateRect
+BeginPaint
+EndPaint
+SetScrollInfo
+GetScrollInfo
+GetKeyState
+SetFocus
+GetDpiForWindow
+LoadCursorW
+SystemParametersInfoW
+
+// Direct2D / DirectWrite
+D2D1CreateFactory
+DWriteCreateFactory
+ID2D1Factory
+ID2D1HwndRenderTarget
+ID2D1SolidColorBrush
+IDWriteFactory
+IDWriteTextFormat
+IDWriteTextLayout
+D2DERR_RECREATE_TARGET
+GetParent
+ValidateRect
+CREATESTRUCTW
+
+// Diagnostics (VIEWER_SPIKE_DIAG)
+GetProcessHandleCount
+K32GetProcessMemoryInfo
+PROCESS_MEMORY_COUNTERS_EX
+GetCurrentProcess
