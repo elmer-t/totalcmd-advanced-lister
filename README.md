@@ -2,7 +2,7 @@
 
 A 64-bit [Total Commander](https://www.ghisler.com/) Lister plugin (`AdvancedViewer.wlx64`) written in C# and compiled with .NET Native AOT. It shows any file as a hex view (offset, hex bytes, ASCII) over a memory-mapped file, rendered with Direct2D/DirectWrite.
 
-![This README open in Advanced Viewer in Total Commander's Lister](docs/readme_screenshot.png)
+![This README open in Advanced Viewer in Total Commander's Lister](docs/screenshot.png)
 
 The plugin is 1.1 MB and needs no installed .NET runtime. The first file opens in about 50~150 ms (depending on hardware specs) in a fresh process, and switching files takes about 1.7 ms. See [RESULTS.md](RESULTS.md) for the measurements.
 
