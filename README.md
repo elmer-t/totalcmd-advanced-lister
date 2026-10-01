@@ -2,7 +2,9 @@
 
 A 64-bit [Total Commander](https://www.ghisler.com/) Lister plugin (`AdvancedViewer.wlx64`) written in C# and compiled with .NET Native AOT. It shows any file as a hex view (offset, hex bytes, ASCII) over a memory-mapped file, rendered with Direct2D/DirectWrite.
 
-This is currently a **spike**. It tests whether C# with Native AOT is a viable basis for a fast file viewer inside Total Commander. The verdict is **GO**: every check passed in the harness and in Total Commander 11.58. The plugin is 1.1 MB, the first file takes about 68 ms in a fresh process, and switching files takes about 1.7 ms. See [RESULTS.md](RESULTS.md) for the measurements and findings.
+![This README open in Advanced Viewer in Total Commander's Lister](docs/readme_screenshot.png)
+
+The plugin is 1.1 MB and needs no installed .NET runtime. The first file opens in about 50~150 ms (depending on hardware specs) in a fresh process, and switching files takes about 1.7 ms. See [RESULTS.md](RESULTS.md) for the measurements.
 
 ## Repository layout
 
@@ -11,8 +13,8 @@ This is currently a **spike**. It tests whether C# with Native AOT is a viable b
 | `src/AdvancedViewer/` | The plugin: Lister exports, window, hex view, memory-mapped file access, logging |
 | `src/Harness/` | Native C++ test harness that loads the plugin outside Total Commander and measures it |
 | `scripts/` | Build, test-file and harness scripts |
-| `docs/` | The spike brief and research notes on the Lister SDK and plugin unloading |
-| `RESULTS.md` | Measured results and the go/no-go recommendation |
+| `docs/` | Design notes and research on the Lister SDK and plugin unloading |
+| `RESULTS.md` | Measured performance and Native AOT findings |
 
 ## Requirements
 
@@ -62,17 +64,6 @@ powershell -ExecutionPolicy Bypass -File scripts\run-harness.ps1 --launches 5 --
 The phases are `loadtime`, `perfile`, `cycle`, `scroll`, `edge`, `throw` and `unload`. Run `src\Harness\bin\Harness.exe --help` for all options.
 
 `scripts\lock-file.ps1` holds `testfiles\locked.bin` open with no sharing, for the manual locked-file check.
-
-## Diagnostics
-
-The plugin appends one line per event to `%TEMP%\viewer-spike.log`. These environment variables change its behaviour. Set them before starting Total Commander or the harness:
-
-| Variable | Effect |
-| --- | --- |
-| `VIEWER_SPIKE_RT=software` | Use the software Direct2D render target instead of the hardware one. First load is faster and uses less memory |
-| `VIEWER_SPIKE_DIAG=N` | Log private bytes and handle counts on every N-th `ListLoadNextW` |
-| `VIEWER_SPIKE_GC=1` | Force a full GC after every `ListLoadNextW` |
-| `VIEWER_SPIKE_NOLOG=1` | Turn off all logging except DIAG lines |
 
 ## Implementation notes
 
