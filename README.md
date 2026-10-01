@@ -6,6 +6,19 @@ A 64-bit [Total Commander](https://www.ghisler.com/) Lister plugin (`AdvancedVie
 
 The plugin is 1.1 MB and needs no installed .NET runtime. The first file opens in about 50~150 ms (depending on hardware specs) in a fresh process, and switching files takes about 1.7 ms. See [RESULTS.md](RESULTS.md) for the measurements.
 
+## Download and install
+
+1. Download `AdvancedViewer-plugin-<version>.zip` from the [latest release](https://github.com/elmer-t/totalcmd-advanced-lister/releases/latest).
+2. In Total Commander (64-bit), navigate to the downloaded zip and press Enter to open it.
+3. Total Commander asks whether to install the plugin. Confirm, and accept the suggested directory.
+4. Press F3 (Lister) or Ctrl+Q (Quick View) on any file.
+
+To install by hand instead, extract `AdvancedViewer.wlx64` to a folder, then add it under **Configuration > Options > Plugins > Lister plugins (.WLX) > Configure > Add**.
+
+Requires Windows 10/11 x64 and 64-bit Total Commander. No .NET runtime is needed.
+
+To update, restart Total Commander and install the new zip over the old one before viewing any file. Once used, the plugin stays loaded until Total Commander exits, so its file cannot be overwritten.
+
 ## Repository layout
 
 | Path | Contents |
@@ -42,7 +55,7 @@ The script fails on any build warning. It writes to `out\`:
 | `dumpbin-exports.txt` | Exported functions. The build checks that all required Lister exports are present |
 | `build-*.log` | Full publish output |
 
-## Install in Total Commander
+## Install a local build
 
 Open `out\AdvancedViewer-plugin.zip` in Total Commander and confirm the install prompt. Then press F3 or Ctrl+Q on any file.
 
