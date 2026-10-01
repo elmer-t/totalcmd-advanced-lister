@@ -90,11 +90,11 @@ Copy-Item $throwtestDll (Join-Path $throwDir 'AdvancedViewer.wlx64') -Force
 # "64-bit support"), so file= names the .wlx64 directly. Kept pure ASCII.
 $inf = @"
 [plugininstall]
-description=Advanced Viewer (hex view, .NET Native AOT)
+description=Advanced Viewer (Markdown and hex view, .NET Native AOT)
 type=wlx
 file=AdvancedViewer.wlx64
 defaultdir=AdvancedViewer
-version=0.1-spike
+version=0.2.0
 "@
 $infPath = Join-Path $out 'pluginst.inf'
 [IO.File]::WriteAllText($infPath, ($inf -replace "`r?`n", "`r`n") + "`r`n", [Text.Encoding]::ASCII)
@@ -108,7 +108,7 @@ $exportsTxt = Join-Path $out 'dumpbin-exports.txt'
 & $dumpbin.FullName /nologo /exports $wlx | Out-File -FilePath $exportsTxt -Encoding utf8
 if ($LASTEXITCODE -ne 0) { throw "dumpbin failed with exit code $LASTEXITCODE" }
 
-$required = 'ListLoadW', 'ListLoad', 'ListLoadNextW', 'ListLoadNext', 'ListCloseWindow', 'ListGetDetectString', 'ListSetDefaultParams'
+$required = 'ListLoadW', 'ListLoad', 'ListLoadNextW', 'ListLoadNext', 'ListCloseWindow', 'ListGetDetectString', 'ListSetDefaultParams', 'ListSendCommand'
 $exportText = Get-Content $exportsTxt -Raw
 $missing = @($required | Where-Object { $exportText -notmatch "\b$_\b" })
 if ($missing.Count -gt 0) { throw "Missing exports: $($missing -join ', ')" }

@@ -1,6 +1,9 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using AdvancedViewer.Hex;
+using AdvancedViewer.Hosting;
+using AdvancedViewer.Markdown;
 using Windows.Win32;
 using Windows.Win32.Foundation;
 
@@ -20,19 +23,24 @@ internal unsafe struct ListDefaultParamStruct
 /// Total Commander Lister plugin exports (listplug.h). x64 has a single calling convention,
 /// so [UnmanagedCallersOnly] without CallConvs matches __stdcall declarations.
 /// Every export catches everything: an exception escaping into TC would kill the host.
+/// Routing: .md/.markdown/.mdown/.mkd files get a <see cref="MarkdownView"/>, everything else
+/// (only reachable with lcp_forceshow, or from the harness) a <see cref="HexView"/>.
 /// </summary>
 internal static unsafe class Exports
 {
     private const int LISTPLUGIN_OK = 0;
     private const int LISTPLUGIN_ERROR = 1;
 
+    // ListSendCommand commands (listplug.h).
+    private const int lc_copy = 1, lc_newparams = 2, lc_selectall = 3, lc_setpercent = 4;
+
     /// <summary>
-    /// Detect string meaning "every file". The SDK grammar has no wildcard (EXT="*" compares
-    /// against the literal "*"), and an empty string is undocumented. This tautology uses only
-    /// documented operators and does not depend on SIZE (whose width for >4 GB files is
-    /// undocumented). MULTIMEDIA is deliberately absent so TC's internal media viewers win.
+    /// Markdown files only, so TC's built-in viewers keep every other file and the runtime only
+    /// starts when needed. With lcp_forceshow (user picked the plugin from the Lister menu) TC
+    /// calls ListLoad for any file anyway; those files get the hex view.
+    /// Note: TC caches this as N_detect in wincmd.ini on first sight of the plugin.
     /// </summary>
-    internal const string DetectString = "EXT=\"\" | EXT!=\"\"";
+    internal const string DetectString = "EXT=\"MD\" | EXT=\"MARKDOWN\" | EXT=\"MDOWN\" | EXT=\"MKD\"";
 
     [UnmanagedCallersOnly(EntryPoint = "ListLoadW")]
     public static nint ListLoadW(nint parentWin, char* fileToLoad, int showFlags)
@@ -42,7 +50,7 @@ internal static unsafe class Exports
         try
         {
             path = fileToLoad == null ? "" : new string(fileToLoad);
-            return LoadCore(parentWin, path, t0, "ListLoadW");
+            return LoadCore(parentWin, path, showFlags, t0, "ListLoadW");
         }
         catch (Exception ex)
         {
@@ -59,7 +67,7 @@ internal static unsafe class Exports
         try
         {
             path = Ansi.ToString(fileToLoad);
-            return LoadCore(parentWin, path, t0, "ListLoad");
+            return LoadCore(parentWin, path, showFlags, t0, "ListLoad");
         }
         catch (Exception ex)
         {
@@ -76,7 +84,7 @@ internal static unsafe class Exports
         try
         {
             path = fileToLoad == null ? "" : new string(fileToLoad);
-            return LoadNextCore(listWin, path, t0, "ListLoadNextW");
+            return LoadNextCore(listWin, path, showFlags, t0, "ListLoadNextW");
         }
         catch (Exception ex)
         {
@@ -93,7 +101,7 @@ internal static unsafe class Exports
         try
         {
             path = Ansi.ToString(fileToLoad);
-            return LoadNextCore(listWin, path, t0, "ListLoadNext");
+            return LoadNextCore(listWin, path, showFlags, t0, "ListLoadNext");
         }
         catch (Exception ex)
         {
@@ -109,8 +117,8 @@ internal static unsafe class Exports
         string? path = null;
         try
         {
-            path = HexView.FromHwnd(listWin)?.Path;
-            // WM_DESTROY releases the render target and unmaps the file; WM_NCDESTROY frees the GCHandle.
+            path = ViewWindow.FromHwnd(listWin)?.View.Path;
+            // WM_DESTROY releases the render target and unloads the view; WM_NCDESTROY frees the GCHandle.
             PInvoke.DestroyWindow((HWND)listWin);
             Log.Write("ListCloseWindow", path, Log.ElapsedUs(t0));
         }
@@ -119,6 +127,42 @@ internal static unsafe class Exports
             Log.Exception("ListCloseWindow", path, t0, ex);
         }
     }
+
+    /// <summary>
+    /// int __stdcall ListSendCommand(HWND ListWin, int Command, int Parameter). ANSI-only export
+    /// by the SDK (no W form). lc_newparams carries the new lcp_* show flags; TC uses it to switch
+    /// dark mode at runtime (HISTORY.TXT 22.01.20), so the theme is re-derived from lcp_darkmode.
+    /// Copy / select all / set percent are not supported yet: logged, and OK returned.
+    /// </summary>
+    [UnmanagedCallersOnly(EntryPoint = "ListSendCommand")]
+    public static int ListSendCommand(nint listWin, int command, int parameter)
+    {
+        long t0 = Log.Now();
+        string? path = null;
+        try
+        {
+            ViewWindow? win = ViewWindow.FromHwnd(listWin);
+            path = win?.View.Path;
+            if (win != null && command == lc_newparams)
+                win.SetTheme(Theme.FromShowFlags(parameter));
+            Log.Write("ListSendCommand", path, Log.ElapsedUs(t0), CommandName(command) + " parameter=", parameter, hasNum: true);
+            return LISTPLUGIN_OK;
+        }
+        catch (Exception ex)
+        {
+            Log.Exception("ListSendCommand", path, t0, ex);
+            return LISTPLUGIN_ERROR;
+        }
+    }
+
+    private static string CommandName(int command) => command switch
+    {
+        lc_copy => "lc_copy",
+        lc_newparams => "lc_newparams",
+        lc_selectall => "lc_selectall",
+        lc_setpercent => "lc_setpercent",
+        _ => "command=" + command,
+    };
 
     [UnmanagedCallersOnly(EntryPoint = "ListGetDetectString")]
     public static void ListGetDetectString(byte* detectString, int maxLen)
@@ -157,27 +201,43 @@ internal static unsafe class Exports
 
     // ------------------------------------------------------------------------------------
 
-    private static nint LoadCore(nint parentWin, string path, long t0, string evt)
+    private static nint LoadCore(nint parentWin, string path, int showFlags, long t0, string evt)
     {
         ThrowTestHook(path);
-        nint hwnd = HexView.Create(parentWin, path, t0, evt);
+        nint hwnd = ViewWindow.Create(parentWin, CreateView(path), path, showFlags, t0, evt);
         Log.Write(evt, path, Log.ElapsedUs(t0), hwnd == 0 ? "result=NULL" : $"hwnd=0x{hwnd:X}");
         return hwnd;
     }
 
-    private static int LoadNextCore(nint listWin, string path, long t0, string evt)
+    private static int LoadNextCore(nint listWin, string path, int showFlags, long t0, string evt)
     {
         ThrowTestHook(path);
-        HexView? view = HexView.FromHwnd(listWin);
-        if (view == null)
+        ViewWindow? win = ViewWindow.FromHwnd(listWin);
+        if (win == null)
         {
             Log.Write(evt, path, Log.ElapsedUs(t0), "result=ERROR (unknown window)");
             return LISTPLUGIN_ERROR;
         }
-        bool ok = view.LoadNext(path, t0, evt);
+        // Same kind of file: reuse the view. Other kind: a fresh view replaces it on success.
+        View view = (win.View is MarkdownView) == IsMarkdownPath(path) ? win.View : CreateView(path);
+        bool ok = win.LoadNext(view, path, showFlags, t0, evt);
         Log.Write(evt, path, Log.ElapsedUs(t0), ok ? "result=OK" : "result=ERROR");
         Diag.AfterLoadNext();
         return ok ? LISTPLUGIN_OK : LISTPLUGIN_ERROR;
+    }
+
+    private static View CreateView(string path) => IsMarkdownPath(path) ? new MarkdownView() : new HexView();
+
+    /// <summary>True for .md, .markdown, .mdown, .mkd (case-insensitive), matching the detect string.</summary>
+    internal static bool IsMarkdownPath(string path)
+    {
+        int dot = path.LastIndexOf('.');
+        if (dot < 0 || path.IndexOf('\\', dot) >= 0 || path.IndexOf('/', dot) >= 0) return false;
+        ReadOnlySpan<char> ext = path.AsSpan(dot + 1);
+        return ext.Equals("md", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals("markdown", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals("mdown", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals("mkd", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Throw-test build only (SPIKE_THROW): a file named __throw__.bin throws inside the export.</summary>

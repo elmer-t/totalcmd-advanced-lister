@@ -1,4 +1,4 @@
-// Kernel32: file mapping, logging
+// Kernel32: file mapping, text file reading, logging
 CreateFileW
 CreateFileMappingW
 MapViewOfFile
@@ -9,10 +9,11 @@ GetFileType
 GetTempPathW
 WriteFile
 MultiByteToWideChar
+ReadFile
 GetModuleHandleExW
 GetCurrentProcessId
 
-// User32: window, input, scroll bar
+// User32: window, input, scroll bar, cursor, idle pump
 RegisterClassExW
 CreateWindowExW
 DestroyWindow
@@ -31,16 +32,28 @@ SetFocus
 GetDpiForWindow
 LoadCursorW
 SystemParametersInfoW
+SetCursor
+GetQueueStatus
+SetTimer
+KillTimer
+
+// Shell32: open links
+ShellExecuteW
 
 // Direct2D / DirectWrite
 D2D1CreateFactory
 DWriteCreateFactory
 ID2D1Factory
 ID2D1HwndRenderTarget
+ID2D1RenderTarget
 ID2D1SolidColorBrush
 IDWriteFactory
 IDWriteTextFormat
 IDWriteTextLayout
+IDWriteFontCollection
+IDWriteInlineObject
+ID2D1StrokeStyle
+DWRITE_WORD_WRAPPING
 D2DERR_RECREATE_TARGET
 GetParent
 ValidateRect
@@ -51,3 +64,6 @@ GetProcessHandleCount
 K32GetProcessMemoryInfo
 PROCESS_MEMORY_COUNTERS_EX
 GetCurrentProcess
+
+// UxTheme: dark-mode scroll bar (DarkMode_Explorer theme class)
+SetWindowTheme

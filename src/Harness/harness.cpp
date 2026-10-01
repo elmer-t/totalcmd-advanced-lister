@@ -9,7 +9,31 @@
 //   Harness.exe [--dll out\AdvancedViewer.wlx64] [--files testfiles] [--throwdll out\throwtest\AdvancedViewer.wlx64]
 //               [--json out\harness-results.json] [--launches 20] [--switches 1000]
 //               [--pagedowns 10000] [--thumbs 1000] [--thumbmsg track|position]
-//               [--phases loadtime,perfile,cycle,scroll,edge,throw,unload]
+//               [--phases loadtime,perfile,cycle,scroll,markdown,edge,throw,unload]
+//   Harness.exe --show <file> [--dark] [--dll path]
+//
+// Phase "markdown" reads <files>\markdown\*.md (sorted). README-class = files <= 1 MB.
+//   (a) ListLoadW (showFlags 0) + UpdateWindow per file: one cold load first (readme.md, else the
+//       first non-empty README-class file; first plugin window in this process), then every file warm. Files
+//       > 1 MB also get a "layout settle time": pump until no WM_APP message arrived for 200 ms
+//       (max 10 s), measured from the end of the first paint (INFO only).
+//   (b) the same for the first 5 files with showFlags lcp_darkmode (128).
+//   (c) ListLoadNextW cycle over the README-class files (--warmup, then --switches) with private
+//       bytes and GDI/USER objects; then one switch each into big-5mb.md and huge-40mb.md and
+//       back (INFO).
+//   (d) big-5mb.md (after layout settled): 2,000 PageDown, then 200 resize steps (client width
+//       300 -> 1600 -> 300 px in 13 px steps, height 800; SetWindowPos on the parent and on the
+//       plugin child), each repaint timed.
+//   (e) big-5mb.md: 500 WM_MOUSEWHEEL notches down, then 500 up, each repaint timed.
+//   Thresholds: README-class first paint median <= 20 ms (warm; light and dark); big-5mb.md first
+//   paint <= 150 ms; switch median <= 20 ms; repaint avg <= 16 ms, worst <= 50 ms (resize: worst
+//   50..100 ms is INFO, > 100 ms FAIL); private bytes <= +5 MB; GDI/USER +-2.
+//
+// --show loads one file into a visible, resizable top-level window (client 1000x800) in this
+// process, like Total Commander's Lister (WM_SIZE resizes the plugin child to the client area),
+// pumps messages until the window is closed (Esc forwarded by the plugin also closes it), then
+// calls ListCloseWindow. --dark passes lcp_darkmode (128). For visual checks and screenshots.
+// --show always runs in-process, with or without --child.
 //
 // Child protocol (stdout, one line each, ASCII):
 //   @@MARK <text>      progress marker (the last one tells where a crash/hang happened)
@@ -57,6 +81,7 @@ typedef void(__stdcall* PListSetDefaultParams)(ListDefaultParamStruct*);
 static const int LISTPLUGIN_OK = 0;
 static const int LISTPLUGIN_ERROR = 1;
 static const int SHOW_FLAGS = 0;  // plain hex view; no lcp_* flags needed by the spike
+static const int LCP_DARKMODE = 128;  // listplug.h lcp_darkmode (Lister interface 2.13)
 
 // ---------------------------------------------------------------------------------------------
 // Utilities
@@ -160,8 +185,10 @@ struct Options {
     std::wstring files = L"testfiles";
     std::wstring throwDll = L"out\\throwtest\\AdvancedViewer.wlx64";
     std::wstring json = L"out\\harness-results.json";
-    std::wstring phases = L"loadtime,perfile,cycle,scroll,edge,throw,unload";
+    std::wstring phases = L"loadtime,perfile,cycle,scroll,markdown,edge,throw,unload";
     std::wstring child;       // phase name when running as child
+    std::wstring show;        // --show <file>: interactive viewer window
+    bool dark = false;        // --dark: lcp_darkmode for --show
     std::wstring thumbMsg = L"track";
     int launches = 20, switches = 1000, pageDowns = 10000, thumbs = 1000, perFileReps = 10, warmup = 50;
 };
@@ -181,6 +208,8 @@ static bool parseArgs(Options& o) {
         else if (a == L"--json") o.json = next();
         else if (a == L"--phases") o.phases = next();
         else if (a == L"--child") o.child = next();
+        else if (a == L"--show") o.show = next();
+        else if (a == L"--dark") o.dark = true;
         else if (a == L"--thumbmsg") o.thumbMsg = next();
         else if (a == L"--launches") o.launches = _wtoi(next().c_str());
         else if (a == L"--switches") o.switches = _wtoi(next().c_str());
@@ -191,11 +220,13 @@ static bool parseArgs(Options& o) {
         else if (a == L"-h" || a == L"--help" || a == L"/?") {
             printf("Harness.exe [--dll path] [--files dir] [--throwdll path] [--json path] [--launches N]\n"
                    "            [--switches N] [--pagedowns N] [--thumbs N] [--reps N] [--warmup N]\n"
-                   "            [--thumbmsg track|position] [--phases loadtime,perfile,cycle,scroll,edge,throw,unload]\n");
+                   "            [--thumbmsg track|position] [--phases loadtime,perfile,cycle,scroll,markdown,edge,throw,unload]\n"
+                   "Harness.exe --show <file> [--dark] [--dll path]   (visible 1000x800 window, in-process)\n");
             return false;
         } else { fprintf(stderr, "unknown argument: %s\n", narrow(a).c_str()); return false; }
     }
     LocalFree(argv);
+    if (!o.show.empty()) o.show = fullPath(o.show);
     o.dll = fullPath(o.dll); o.files = fullPath(o.files); o.throwDll = fullPath(o.throwDll); o.json = fullPath(o.json);
     return true;
 }
@@ -358,12 +389,12 @@ static std::vector<wchar_t> wbuf(const std::wstring& s) { std::vector<wchar_t> b
 static std::vector<char> abuf(const std::string& s) { std::vector<char> b(s.begin(), s.end()); b.push_back(0); return b; }
 
 // ListLoadW followed by UpdateWindow (delivers WM_PAINT synchronously).
-static CallRes timedLoadW(Plugin& p, HWND host, const std::wstring& file) {
+static CallRes timedLoadW(Plugin& p, HWND host, const std::wstring& file, int flags = SHOW_FLAGS) {
     auto b = wbuf(file);
     CallRes r;
     SetLastError(0);
     int64_t t0 = qpc();
-    r.h = p.LoadW(host, b.data(), SHOW_FLAGS);
+    r.h = p.LoadW(host, b.data(), flags);
     r.err = GetLastError();
     if (r.h) { r.invalidated = GetUpdateRect(r.h, nullptr, FALSE) != 0; UpdateWindow(r.h); }
     r.us = usSince(t0, qpc());
@@ -380,12 +411,12 @@ static CallRes timedLoadA(Plugin& p, HWND host, const std::string& file) {
     r.us = usSince(t0, qpc());
     return r;
 }
-static CallRes timedNextW(Plugin& p, HWND host, HWND win, const std::wstring& file) {
+static CallRes timedNextW(Plugin& p, HWND host, HWND win, const std::wstring& file, int flags = SHOW_FLAGS) {
     auto b = wbuf(file);
     CallRes r; r.h = win;
     SetLastError(0);
     int64_t t0 = qpc();
-    r.rc = p.LoadNextW(host, win, b.data(), SHOW_FLAGS);
+    r.rc = p.LoadNextW(host, win, b.data(), flags);
     r.err = GetLastError();
     r.invalidated = GetUpdateRect(win, nullptr, FALSE) != 0;
     UpdateWindow(win);
@@ -646,6 +677,430 @@ static int phaseScroll(const Options& o) {
         .add("thumb", JObj().add("time", jstats(ts)).add("message", jstr(usePosition ? "SB_THUMBPOSITION" : "SB_THUMBTRACK"))
                           .add("method", jstr("SetScrollInfo(SIF_POS, target) then SendMessage(WM_VSCROLL, MAKEWPARAM(code, target & 0xFFFF)) then UpdateWindow"))
                           .add("paintPending", jint(thInval)).add("trackPosEqualsPos", jint(trackPosMatches)).str()).str());
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Markdown phase
+// ---------------------------------------------------------------------------------------------
+static const long long MD_README_MAX = 1048576;  // README-class: <= 1 MB
+static const int MD_PAGEDOWNS = 2000, MD_RESIZE_STEPS = 200, MD_WHEEL_NOTCHES = 500, MD_DARK_FILES = 5;
+static const int MD_RESIZE_MIN_W = 300, MD_RESIZE_MAX_W = 1600, MD_RESIZE_H = 800;
+
+static bool readmeClass(const TestFile& f) { return f.size >= 0 && f.size <= MD_README_MAX; }
+
+// <dir>\markdown\*.md, sorted case-insensitively. The extension is checked explicitly because
+// FindFirstFile patterns also match 8.3 short names.
+static std::vector<TestFile> markdownSet(const std::wstring& dir) {
+    std::vector<TestFile> v;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((dir + L"\\markdown\\*.md").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return v;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring n = fd.cFileName;
+        if (n.size() < 3 || _wcsicmp(n.c_str() + n.size() - 3, L".md") != 0) continue;
+        TestFile t; t.name = narrow(n); t.path = dir + L"\\markdown\\" + n;
+        t.size = ((long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        v.push_back(t);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(v.begin(), v.end(), [](const TestFile& a, const TestFile& b) { return _wcsicmp(a.path.c_str(), b.path.c_str()) < 0; });
+    return v;
+}
+
+// Background layout settle: dispatch everything, and stop once no WM_APP..0xBFFF message has been
+// seen for quietMs (or after maxMs). Time = start of the call .. last WM_APP message handled.
+struct Settle { double ms = 0, waitedMs = 0; int appMessages = 0; bool timedOut = false; };
+static Settle settleLayout(DWORD quietMs = 200, DWORD maxMs = 10000) {
+    Settle s;
+    int64_t t0 = qpc(), lastApp = t0;
+    for (;;) {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+            bool app = m.message >= WM_APP && m.message <= 0xBFFF;
+            TranslateMessage(&m); DispatchMessageW(&m);
+            if (app) { s.appMessages++; lastApp = qpc(); }
+        }
+        int64_t now = qpc();
+        if (usSince(lastApp, now) >= quietMs * 1000.0) break;
+        if (usSince(t0, now) >= maxMs * 1000.0) { s.timedOut = true; break; }
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 5, QS_ALLINPUT);
+    }
+    s.ms = s.appMessages ? usSince(t0, lastApp) / 1000 : 0;
+    s.waitedMs = usSince(t0, qpc()) / 1000;
+    return s;
+}
+static std::string jsettle(const Settle& s) {
+    return JObj().add("settleMs", jnum(s.ms)).add("wmAppMessages", jint(s.appMessages)).add("timedOut", jbool(s.timedOut)).add("waitedMs", jnum(s.waitedMs)).str();
+}
+static std::string ssettle(const Settle& s) {
+    return s.appMessages ? fmt("%.1f ms, %d WM_APP messages%s", s.ms, s.appMessages, s.timedOut ? ", NOT settled after 10 s" : "")
+                         : std::string("0 ms (no WM_APP messages seen)");
+}
+// Repaint verdict: avg <= 16 ms and worst <= 50 ms; with looseWorst, a worst of 50..looseWorst ms is INFO.
+static const char* repaintVerdict(const Stats& s, double looseWorst = 0) {
+    if (s.n == 0) return "SKIP";
+    if (s.avg > 16) return "FAIL";
+    if (s.max <= 50) return "PASS";
+    return looseWorst > 0 && s.max <= looseWorst ? "INFO" : "FAIL";
+}
+static int countOver(const std::vector<double>& v, double ms) {
+    return (int)std::count_if(v.begin(), v.end(), [ms](double x) { return x > ms * 1000; });
+}
+static int worstAt(const std::vector<double>& v) {  // 0-based sample index of the slowest repaint, -1 if none
+    return v.empty() ? -1 : (int)(std::max_element(v.begin(), v.end()) - v.begin());
+}
+static void setClientSize(HWND host, int w, int h) {
+    RECT rc = {0, 0, w, h};
+    AdjustWindowRectExForDpi(&rc, (DWORD)GetWindowLongPtrW(host, GWL_STYLE), FALSE, (DWORD)GetWindowLongPtrW(host, GWL_EXSTYLE), GetDpiForWindow(host));
+    SetWindowPos(host, nullptr, 0, 0, rc.right - rc.left, rc.bottom - rc.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+static int phaseMarkdown(const Options& o) {
+    HWND host = createHost(); pump();
+    Plugin p; loadOrDie(o.dll, p);
+    auto set = markdownSet(o.files);
+    if (set.empty()) {
+        SUM("FATAL: no .md files in " + narrow(o.files) + "\\markdown");
+        emit("@@JSON", JObj().add("fatal", jstr("no .md files in <files>\\markdown")).str());
+        return 2;
+    }
+    const TestFile* big5 = nullptr; const TestFile* huge40 = nullptr;
+    std::vector<TestFile> readmes;
+    for (auto& f : set) {
+        if (_stricmp(f.name.c_str(), "big-5mb.md") == 0) big5 = &f;
+        if (_stricmp(f.name.c_str(), "huge-40mb.md") == 0) huge40 = &f;
+        if (readmeClass(f)) readmes.push_back(f);
+    }
+    int nBig = (int)(set.size() - readmes.size());
+    SUM(fmt("corpus: %zu .md files (%zu README-class <= 1 MB, %d bigger); big-5mb.md %s, huge-40mb.md %s",
+            set.size(), readmes.size(), nBig, big5 ? "present" : "MISSING", huge40 ? "present" : "MISSING"));
+
+    // (a) first paint, light. One cold load (readme.md, else the first non-empty README-class
+    // file), then every file warm.
+    const TestFile* coldP = readmes.empty() ? &set[0] : &readmes[0];
+    for (auto& f : readmes) if (f.size > 0) { coldP = &f; break; }
+    for (auto& f : readmes) if (_stricmp(f.name.c_str(), "readme.md") == 0) { coldP = &f; break; }
+    const TestFile& coldF = *coldP;
+    MARK("cold ListLoadW(" + coldF.name + ")");
+    CallRes cold = timedLoadW(p, host, coldF.path, 0);
+    pump(); closeWin(p, cold.h);
+    std::vector<double> readmeWarm; std::vector<std::string> fileJ, notOpened;
+    double big5First = NAN, huge40First = NAN;
+    std::map<std::string, Settle> settles;
+    for (auto& f : set) {
+        MARK("ListLoadW(" + f.name + ")");
+        CallRes r = timedLoadW(p, host, f.path, 0);
+        Settle st;
+        if (r.h) {
+            if (!readmeClass(f)) { MARK("layout settle " + f.name); st = settleLayout(); settles[f.name] = st; }
+            else pump();
+            if (readmeClass(f)) readmeWarm.push_back(r.us);
+        } else notOpened.push_back(f.name);
+        if (&f == big5) big5First = r.us;
+        if (&f == huge40) huge40First = r.us;
+        JObj j; j.add("name", jstr(f.name)).add("size", jint(f.size)).add("windowReturned", jbool(r.h != nullptr))
+            .add("paintPending", jbool(r.invalidated)).add("firstPaintMs", jnum(r.us / 1000));
+        if (!readmeClass(f) && r.h) j.add("layout", jsettle(st));
+        fileJ.push_back(j.str());
+        closeWin(p, r.h);
+    }
+
+    // (b) first paint, dark (lcp_darkmode), first files of the sorted list.
+    std::vector<double> readmeDark; std::vector<std::string> darkJ; int darkOpened = 0;
+    size_t nDark = std::min<size_t>(MD_DARK_FILES, set.size());
+    for (size_t i = 0; i < nDark; i++) {
+        const TestFile& f = set[i];
+        MARK("ListLoadW dark(" + f.name + ")");
+        CallRes r = timedLoadW(p, host, f.path, LCP_DARKMODE);
+        if (r.h) { darkOpened++; if (readmeClass(f)) readmeDark.push_back(r.us); }
+        pump();
+        darkJ.push_back(JObj().add("name", jstr(f.name)).add("size", jint(f.size)).add("windowReturned", jbool(r.h != nullptr))
+            .add("firstPaintMs", jnum(r.us / 1000)).str());
+        closeWin(p, r.h);
+    }
+
+    // (c) ListLoadNextW cycle over README-class files; leak check; then one switch into each big file.
+    Stats sw; long long privGrowth = 0; int gdiDelta = 0, userDelta = 0, invalidatedCount = 0;
+    std::map<std::string, int> errors;
+    std::string cycleJ = "null";
+    struct BigSwitch { std::string name; double inUs = NAN, backUs = NAN; int rc = -1; };
+    std::vector<BigSwitch> bigSwitches;
+    if (readmes.empty()) SUM("cycle: SKIPPED (no README-class files)");
+    else {
+        MARK("cycle ListLoadW(" + readmes[0].name + ")");
+        Snapshot before = snap();
+        CallRes r0 = timedLoadW(p, host, readmes[0].path, 0);
+        if (!r0.h) SUM("cycle: SKIPPED (ListLoadW(" + readmes[0].name + ") returned NULL)");
+        else {
+            HWND win = r0.h;
+            Snapshot initial = snap();
+            MARK("cycle warm-up");
+            size_t idx = 0;
+            for (int i = 0; i < o.warmup; i++) { timedNextW(p, host, win, readmes[idx++ % readmes.size()].path, 0); pump(); }
+            timedNextW(p, host, win, readmes[0].path, 0); pump();
+            Snapshot start = snap();
+            std::vector<double> all;
+            MARK("cycle");
+            for (int i = 0; i < o.switches; i++) {
+                const TestFile& f = readmes[idx++ % readmes.size()];
+                CallRes r = timedNextW(p, host, win, f.path, 0);
+                all.push_back(r.us);
+                if (r.rc != LISTPLUGIN_OK) errors[f.name]++;
+                if (r.invalidated) invalidatedCount++;
+                pump();
+                if (!IsWindow(win)) { SUM(fmt("FATAL: plugin window destroyed after switch %d (%s)", i, f.name.c_str())); break; }
+            }
+            MARK("cycle final ListLoadNextW(" + readmes[0].name + ")");
+            timedNextW(p, host, win, readmes[0].path, 0);
+            Snapshot end = snap();
+            // Big files after the leak window: switch in, paint, switch straight back (cancels pending layout).
+            for (const TestFile* b : {big5, huge40}) {
+                if (!b || !IsWindow(win)) continue;
+                MARK("cycle ListLoadNextW(" + b->name + ")");
+                BigSwitch bs; bs.name = b->name;
+                CallRes in = timedNextW(p, host, win, b->path, 0);
+                bs.inUs = in.us; bs.rc = in.rc;
+                pump();
+                MARK("cycle ListLoadNextW back to " + readmes[0].name);
+                CallRes back = timedNextW(p, host, win, readmes[0].path, 0);
+                bs.backUs = back.us;
+                pump();
+                bigSwitches.push_back(bs);
+            }
+            MARK("cycle ListCloseWindow");
+            closeWin(p, win);
+            Snapshot afterClose = snap();
+            sw = stats(all);
+            privGrowth = end.privateBytes - start.privateBytes;
+            gdiDelta = (int)end.gdi - (int)start.gdi; userDelta = (int)end.user - (int)start.user;
+            std::vector<std::string> errJ, bigJ;
+            for (auto& e : errors) errJ.push_back(JObj().add("file", jstr(e.first)).add("count", jint(e.second)).str());
+            for (auto& b : bigSwitches) bigJ.push_back(JObj().add("file", jstr(b.name)).add("rc", jint(b.rc)).add("switchInMs", jnum(b.inUs / 1000)).add("switchBackMs", jnum(b.backUs / 1000)).str());
+            cycleJ = JObj().add("listSize", jint((long long)readmes.size())).add("switches", jint(o.switches)).add("warmup", jint(o.warmup))
+                .add("time", jstats(sw)).add("errors", jarr(errJ)).add("paintPendingCount", jint(invalidatedCount)).add("bigSwitches", jarr(bigJ))
+                .add("memory", JObj().add("beforeLoad", jsnap(before)).add("afterFirstLoad", jsnap(initial)).add("startAfterWarmup", jsnap(start))
+                                   .add("end", jsnap(end)).add("afterClose", jsnap(afterClose)).str())
+                .add("privateBytesGrowth", jint(privGrowth)).add("gdiDelta", jint(gdiDelta)).add("userDelta", jint(userDelta)).str();
+            SUM(fmt("cycle: %zu README-class files, %d switches after %d warm-up switches", readmes.size(), o.switches, o.warmup));
+            SUM("ListLoadNextW+paint (README-class): " + sstats(sw));
+            std::string errS; for (auto& e : errors) errS += fmt("%s x%d  ", e.first.c_str(), e.second);
+            SUM("calls returning LISTPLUGIN_ERROR: " + (errS.empty() ? std::string("none") : errS));
+            for (auto& b : bigSwitches) SUM(fmt("switch into %s: %.2f ms (rc %d), straight back: %.2f ms", b.name.c_str(), b.inUs / 1000, b.rc, b.backUs / 1000));
+            SUM(fmt("private bytes: before load %lld, start (after warm-up) %lld, end %lld, after close %lld (growth %+.2f MB)",
+                    before.privateBytes, start.privateBytes, end.privateBytes, afterClose.privateBytes, privGrowth / 1048576.0));
+            SUM(fmt("GDI objects: start %lu, end %lu, after close %lu | USER objects: start %lu, end %lu, after close %lu",
+                    start.gdi, end.gdi, afterClose.gdi, start.user, end.user, afterClose.user));
+        }
+    }
+
+    // (d) + (e) on big-5mb.md: PageDown, resize, wheel.
+    std::vector<double> pd, rs, wh;
+    int pdInval = 0, rsInval = 0, whInval = 0;
+    SCROLLINFO si0 = {sizeof si0, SIF_ALL}, si1 = {sizeof si1, SIF_ALL}, si2 = {sizeof si2, SIF_ALL}, si3 = {sizeof si3, SIF_ALL};
+    Settle scrollSettle;
+    std::string scrollJ = "null";
+    if (!big5) SUM("scroll/resize/wheel: SKIPPED (big-5mb.md missing)");
+    else {
+        setClientSize(host, 1000, MD_RESIZE_H); pump();
+        MARK("ListLoadW(big-5mb.md) for scrolling");
+        CallRes r = timedLoadW(p, host, big5->path, 0);
+        if (!r.h) SUM("scroll/resize/wheel: SKIPPED (ListLoadW(big-5mb.md) returned NULL)");
+        else {
+            HWND win = r.h;
+            MARK("layout settle before scrolling");
+            scrollSettle = settleLayout();
+            SetFocus(win);
+            GetScrollInfo(win, SB_VERT, &si0);
+
+            MARK(fmt("PageDown x%d", MD_PAGEDOWNS));
+            UINT scan = MapVirtualKeyW(VK_NEXT, MAPVK_VK_TO_VSC);
+            LPARAM kl = 1 | ((LPARAM)scan << 16) | (1 << 24);
+            for (int i = 0; i < MD_PAGEDOWNS; i++) {
+                int64_t t0 = qpc();
+                SendMessageW(win, WM_KEYDOWN, VK_NEXT, kl);
+                if (GetUpdateRect(win, nullptr, FALSE)) pdInval++;
+                UpdateWindow(win);
+                pd.push_back(usSince(t0, qpc()));
+                pump();
+            }
+            GetScrollInfo(win, SB_VERT, &si1);
+
+            MARK(fmt("resize x%d", MD_RESIZE_STEPS));
+            // Start at the minimum width (untimed), then 13 px steps up to 1600 and back to 300.
+            setClientSize(host, MD_RESIZE_MIN_W, MD_RESIZE_H);
+            SetWindowPos(win, nullptr, 0, 0, MD_RESIZE_MIN_W, MD_RESIZE_H, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            UpdateWindow(win); pump();
+            int half = MD_RESIZE_STEPS / 2;
+            for (int i = 1; i <= MD_RESIZE_STEPS; i++) {
+                int up = i <= half ? i : MD_RESIZE_STEPS - i;  // 1..100, 99..0
+                int w = MD_RESIZE_MIN_W + (int)std::lround((double)(MD_RESIZE_MAX_W - MD_RESIZE_MIN_W) * up / half);
+                int64_t t0 = qpc();
+                setClientSize(host, w, MD_RESIZE_H);
+                SetWindowPos(win, nullptr, 0, 0, w, MD_RESIZE_H, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);  // TC resizes the child itself
+                if (GetUpdateRect(win, nullptr, FALSE)) rsInval++;
+                UpdateWindow(win);
+                rs.push_back(usSince(t0, qpc()));
+                pump();
+            }
+            GetScrollInfo(win, SB_VERT, &si2);
+            setClientSize(host, 1000, MD_RESIZE_H);
+            SetWindowPos(win, nullptr, 0, 0, 1000, MD_RESIZE_H, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            UpdateWindow(win); pump();
+
+            MARK(fmt("wheel x%d down + x%d up", MD_WHEEL_NOTCHES, MD_WHEEL_NOTCHES));
+            RECT wr; GetWindowRect(win, &wr);
+            LPARAM pt = MAKELPARAM((wr.left + wr.right) / 2, (wr.top + wr.bottom) / 2);  // screen coordinates
+            for (int i = 0; i < 2 * MD_WHEEL_NOTCHES; i++) {
+                short delta = i < MD_WHEEL_NOTCHES ? -WHEEL_DELTA : WHEEL_DELTA;
+                int64_t t0 = qpc();
+                SendMessageW(win, WM_MOUSEWHEEL, MAKEWPARAM(0, (WORD)delta), pt);
+                if (GetUpdateRect(win, nullptr, FALSE)) whInval++;
+                UpdateWindow(win);
+                wh.push_back(usSince(t0, qpc()));
+                pump();
+            }
+            GetScrollInfo(win, SB_VERT, &si3);
+            closeWin(p, win);
+        }
+    }
+
+    // Report.
+    Stats sr = stats(readmeWarm), sd = stats(readmeDark), ps = stats(pd), rss = stats(rs), ws = stats(wh);
+    SUM(fmt("cold first paint (%s, first plugin window in process): %.2f ms%s", coldF.name.c_str(), cold.us / 1000, cold.h ? "" : " (NULL)"));
+    SUM("first paint, README-class, warm, light: " + sstats(sr));
+    SUM("first paint, README-class, dark:        " + sstats(sd) + fmt("  (first %zu files, %d windows)", nDark, darkOpened));
+    for (auto& f : set) {
+        if (readmeClass(f)) continue;
+        double us = &f == big5 ? big5First : &f == huge40 ? huge40First : NAN;
+        auto it = settles.find(f.name);
+        SUM(fmt("  %-14s size=%-10lld first paint %8.2f ms, layout settle %s", f.name.c_str(), f.size, us / 1000,
+                it == settles.end() ? "-" : ssettle(it->second).c_str()));
+    }
+    if (!notOpened.empty()) { std::string s; for (auto& n : notOpened) s += n + " "; SUM("ListLoadW returned NULL for: " + s); }
+    if (big5) {
+        SUM(fmt("big-5mb.md scrolling (layout settle before: %s), scroll range %d..%d page %u", ssettle(scrollSettle).c_str(), si0.nMin, si0.nMax, si0.nPage));
+        SUM("  PageDown repaint: " + sstats(ps) + fmt("  (paint pending %d/%zu, pos %d -> %d)", pdInval, pd.size(), si0.nPos, si1.nPos));
+        SUM("  resize repaint:   " + sstats(rss) + fmt("  (paint pending %d/%zu, pos after %d)", rsInval, rs.size(), si2.nPos));
+        SUM("  wheel repaint:    " + sstats(ws) + fmt("  (paint pending %d/%zu, pos after down+up %d)", whInval, wh.size(), si3.nPos));
+    }
+
+    CHECK("Markdown: files opened (ListLoadW returned a window)", notOpened.empty() ? "PASS" : "FAIL",
+          fmt("%zu of %zu", set.size() - notOpened.size(), set.size()), "all");
+    CHECK("Markdown: first paint, cold (first window in process)", "INFO", fmt("%.2f ms (%s)", cold.us / 1000, coldF.name.c_str()), "record");
+    CHECK("Markdown: first paint, README-class, warm", sr.n == 0 ? "SKIP" : sr.median <= 20 ? "PASS" : "FAIL",
+          fmt("median %.2f ms, max %.2f ms (%zu files)", sr.median, sr.max, sr.n), "median <= 20 ms");
+    CHECK("Markdown: first paint, README-class, dark", sd.n == 0 ? "SKIP" : sd.median <= 20 ? "PASS" : "FAIL",
+          fmt("median %.2f ms, max %.2f ms (%zu files)", sd.median, sd.max, sd.n), "median <= 20 ms");
+    CHECK("Markdown: first paint, big-5mb.md", !big5 ? "SKIP" : (std::isfinite(big5First) && big5First <= 150000) ? "PASS" : "FAIL",
+          big5 ? fmt("%.2f ms", big5First / 1000) : std::string("file missing"), "<= 150 ms");
+    if (huge40) CHECK("Markdown: first paint, huge-40mb.md", "INFO", fmt("%.2f ms", huge40First / 1000), "record (32 MB cap)");
+    for (auto& s : settles)
+        CHECK("Markdown: layout settle time, " + s.first, "INFO", ssettle(s.second), "record (max wait 10 s)");
+    CHECK("Markdown: switch (ListLoadNextW + paint), README-class", sw.n == 0 ? "SKIP" : sw.median <= 20 ? "PASS" : "FAIL",
+          fmt("median %.2f ms, p99 %.2f ms, max %.2f ms", sw.median, sw.p99, sw.max), "median <= 20 ms");
+    for (auto& b : bigSwitches)
+        CHECK("Markdown: switch into " + b.name, "INFO", fmt("%.2f ms (rc %d), back %.2f ms", b.inUs / 1000, b.rc, b.backUs / 1000), "record");
+    CHECK("Markdown: leaks: private bytes over switches", sw.n == 0 ? "SKIP" : privGrowth <= 5 * 1048576 ? "PASS" : "FAIL",
+          fmt("%+.2f MB", privGrowth / 1048576.0), "<= 5 MB");
+    CHECK("Markdown: leaks: GDI/USER objects over switches", sw.n == 0 ? "SKIP" : (std::abs(gdiDelta) <= 2 && std::abs(userDelta) <= 2) ? "PASS" : "FAIL",
+          fmt("GDI %+d, USER %+d", gdiDelta, userDelta), "start +-2");
+    auto rep = [&](const Stats& s, const std::vector<double>& v) {
+        return fmt("avg %.2f ms, worst %.2f ms (#%d), p99 %.2f ms, %d of %zu over 50 ms", s.avg, s.max, worstAt(v), s.p99, countOver(v, 50), v.size());
+    };
+    CHECK("Markdown: PageDown repaint (big-5mb.md)", repaintVerdict(ps), rep(ps, pd), "avg <= 16 ms, worst <= 50 ms");
+    CHECK("Markdown: resize repaint (big-5mb.md)", repaintVerdict(rss, 100), rep(rss, rs), "avg <= 16 ms, worst <= 50 ms (50..100 ms INFO)");
+    CHECK("Markdown: wheel repaint (big-5mb.md)", repaintVerdict(ws), rep(ws, wh), "avg <= 16 ms, worst <= 50 ms");
+
+    std::vector<std::string> settleJ;
+    for (auto& s : settles) settleJ.push_back(JObj().add("file", jstr(s.first)).add("layout", jsettle(s.second)).str());
+    if (big5) {
+        scrollJ = JObj().add("file", jstr(big5->name)).add("size", jint(big5->size)).add("layoutBeforeScroll", jsettle(scrollSettle))
+            .add("scrollInfo", JObj().add("min", jint(si0.nMin)).add("max", jint(si0.nMax)).add("page", jint(si0.nPage)).str())
+            .add("pageDown", JObj().add("count", jint(MD_PAGEDOWNS)).add("time", jstats(ps)).add("worstIndex", jint(worstAt(pd))).add("paintPending", jint(pdInval))
+                                 .add("posBefore", jint(si0.nPos)).add("posAfter", jint(si1.nPos)).str())
+            .add("resize", JObj().add("steps", jint(MD_RESIZE_STEPS)).add("minClientWidth", jint(MD_RESIZE_MIN_W)).add("maxClientWidth", jint(MD_RESIZE_MAX_W))
+                               .add("clientHeight", jint(MD_RESIZE_H)).add("time", jstats(rss)).add("worstIndex", jint(worstAt(rs)))
+                               .add("paintPending", jint(rsInval)).add("posAfter", jint(si2.nPos)).str())
+            .add("wheel", JObj().add("notchesEachWay", jint(MD_WHEEL_NOTCHES)).add("time", jstats(ws)).add("worstIndex", jint(worstAt(wh)))
+                              .add("paintPending", jint(whInval)).add("posAfter", jint(si3.nPos)).str())
+            .str();
+    }
+    emit("@@JSON", JObj().add("files", jint((long long)set.size())).add("readmeClassFiles", jint((long long)readmes.size()))
+        .add("cold", JObj().add("file", jstr(coldF.name)).add("firstPaintMs", jnum(cold.us / 1000)).add("windowReturned", jbool(cold.h != nullptr)).str())
+        .add("firstPaintLight", JObj().add("readmeClassWarm", jstats(sr)).add("big5mbMs", jnum(big5First / 1000)).add("huge40mbMs", jnum(huge40First / 1000))
+                                    .add("perFile", jarr(fileJ)).add("layoutSettle", jarr(settleJ)).str())
+        .add("firstPaintDark", JObj().add("showFlags", jint(LCP_DARKMODE)).add("readmeClass", jstats(sd)).add("perFile", jarr(darkJ)).str())
+        .add("cycle", cycleJ).add("big5mb", scrollJ).str());
+    return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// --show: one file in a visible window, for manual inspection
+// ---------------------------------------------------------------------------------------------
+static HWND g_showChild = nullptr;
+static Plugin* g_showPlugin = nullptr;
+static LRESULT CALLBACK ShowProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_SIZE:  // Total Commander resizes the plugin window to its client area
+        if (g_showChild) SetWindowPos(g_showChild, nullptr, 0, 0, LOWORD(l), HIWORD(l), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    case WM_SETFOCUS:
+        if (g_showChild) SetFocus(g_showChild);
+        return 0;
+    case WM_KEYDOWN:  // keys the plugin forwards; Esc closes, as in Lister
+        if (w == VK_ESCAPE) PostMessageW(h, WM_CLOSE, 0, 0);
+        return 0;
+    case WM_CLOSE:
+        if (g_showChild) { g_showPlugin->Close(g_showChild); g_showChild = nullptr; }
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+static int runShow(const Options& o) {
+    SetConsoleOutputCP(CP_UTF8);
+    if (fileSize(o.show) < 0) { fprintf(stderr, "file not found: %s\n", narrow(o.show).c_str()); return 1; }
+    WNDCLASSEXW wc = {sizeof wc};
+    wc.lpfnWndProc = ShowProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"ListerHarnessShow";
+    RegisterClassExW(&wc);
+    DWORD style = WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN;
+    RECT rc = {0, 0, 1000, 800};
+    AdjustWindowRectExForDpi(&rc, style, FALSE, 0, GetDpiForSystem());
+    std::wstring title = L"Harness --show" + std::wstring(o.dark ? L" --dark" : L"") + L": " + o.show;
+    HWND host = CreateWindowExW(0, wc.lpszClassName, title.c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT,
+                                rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, wc.hInstance, nullptr);
+    if (!host) { fprintf(stderr, "CreateWindowExW failed (%lu)\n", GetLastError()); return 1; }
+    setClientSize(host, 1000, 800);  // exact client size at the window's actual DPI
+    ShowWindow(host, SW_SHOW);
+    UpdateWindow(host);
+    Plugin p; loadOrDie(o.dll, p);
+    g_showPlugin = &p;
+    int flags = o.dark ? LCP_DARKMODE : 0;
+    CallRes r = timedLoadW(p, host, o.show, flags);
+    if (!r.h) {
+        printf("ListLoadW(%s, flags %d) returned NULL (last error %lu)\n", narrow(o.show).c_str(), flags, r.err);
+        DestroyWindow(host);
+        return 2;
+    }
+    g_showChild = r.h;
+    RECT cr; GetClientRect(host, &cr);
+    SetWindowPos(r.h, nullptr, 0, 0, cr.right, cr.bottom, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetFocus(r.h);
+    printf("ListLoadW + first paint: %.2f ms (flags %d). Close the window or press Esc to exit.\n", r.us / 1000, flags);
+    fflush(stdout);
+    MSG m;
+    while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
+    if (g_showChild) { p.Close(g_showChild); g_showChild = nullptr; }  // WM_QUIT from elsewhere
+    printf("closed.\n");
     return 0;
 }
 
@@ -954,6 +1409,8 @@ static int runParent(const Options& o) {
 
     auto set = coreSet(o.files);
     for (auto& f : set) if (f.size < 0) printf("  WARNING: test file missing: %s (%s)\n", f.name.c_str(), narrow(f.path).c_str());
+    if (hasPhase(o, L"markdown") && markdownSet(o.files).empty())
+        printf("  WARNING: no .md files in %s\\markdown (markdown phase will fail)\n", narrow(o.files).c_str());
 
     JObj phases;
     // Probe: resolve exports in a child; fail loudly.
@@ -999,6 +1456,7 @@ static int runParent(const Options& o) {
         {L"perfile", "Step 4: ListLoadW + UpdateWindow per test file", 300000},
         {L"cycle", "Step 5: ListLoadNextW cycling", 900000},
         {L"scroll", "Step 6: scroll repaint on the largest file", 900000},
+        {L"markdown", "Markdown: first paint, switching, scroll/resize/wheel repaint", 900000},
         {L"edge", "Edge cases", 120000},
     };
     for (auto& ph : list) {
@@ -1063,12 +1521,14 @@ int wmain() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);  // as TC 64-bit is DPI aware
     Options o;
     if (!parseArgs(o)) return 1;
+    if (!o.show.empty()) return runShow(o);  // with or without --child: always in-process
     if (o.child.empty()) return runParent(o);
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);  // no WER dialog in children; crash = exit code
     if (o.child == L"loadtime") return phaseLoadtime(o);
     if (o.child == L"perfile") return phasePerfile(o);
     if (o.child == L"cycle") return phaseCycle(o);
     if (o.child == L"scroll") return phaseScroll(o);
+    if (o.child == L"markdown") return phaseMarkdown(o);
     if (o.child == L"edge") return phaseEdge(o);
     if (o.child == L"throw") return phaseThrow(o);
     if (o.child == L"unload") return phaseUnload(o);

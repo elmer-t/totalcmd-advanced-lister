@@ -2,6 +2,11 @@
 # Any extra arguments are passed to Harness.exe, e.g.:
 #   powershell -ExecutionPolicy Bypass -File scripts\run-harness.ps1 --launches 5 --phases loadtime,edge
 # Defaults: --dll out\AdvancedViewer.wlx64 --throwdll out\throwtest\AdvancedViewer.wlx64 --files testfiles --json out\harness-results.json
+# Phases (default all): loadtime,perfile,cycle,scroll,markdown,edge,throw,unload.
+#   markdown reads testfiles\markdown\*.md (incl. big-5mb.md, huge-40mb.md), e.g.:
+#   powershell -ExecutionPolicy Bypass -File scripts\run-harness.ps1 --phases markdown
+# Visual check of one file in a 1000x800 window (in-process; close it or press Esc to exit):
+#   powershell -ExecutionPolicy Bypass -File scripts\run-harness.ps1 --show testfiles\markdown\readme.md [--dark]
 param([switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)

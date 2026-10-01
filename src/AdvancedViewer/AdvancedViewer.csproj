@@ -61,6 +61,7 @@
     <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.335">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <PackageReference Include="Markdig" Version="1.4.0" />
   </ItemGroup>
 
 </Project>

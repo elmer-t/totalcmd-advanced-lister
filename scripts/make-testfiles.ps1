@@ -2,11 +2,15 @@
 # Works in Windows PowerShell 5.1 and PowerShell 7. Needs no admin rights.
 # Idempotent: re-running removes the deny ACE on denied.bin before recreating things.
 #
-# Usage: powershell -ExecutionPolicy Bypass -File scripts\make-testfiles.ps1 [-Target <dir>] [-SkipHuge]
+# Also copies the markdown corpus (testdata\markdown) to <Target>\markdown and generates
+# big-5mb.md and huge-40mb.md there; -MarkdownOnly stops after that (no hex test files).
+#
+# Usage: powershell -ExecutionPolicy Bypass -File scripts\make-testfiles.ps1 [-Target <dir>] [-SkipHuge] [-MarkdownOnly]
 [CmdletBinding()]
 param(
     [string]$Target = '',
-    [switch]$SkipHuge
+    [switch]$SkipHuge,
+    [switch]$MarkdownOnly
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
@@ -32,6 +36,46 @@ function Write-RandomFile([string]$Path, [long]$Size) {
 $Target = [System.IO.Path]::GetFullPath($Target)
 New-Item -ItemType Directory -Force -Path $Target | Out-Null
 Write-Host "Test files -> $Target"
+
+# --- markdown\: committed corpus + generated big files ----------------------------
+# Copies testdata\markdown\*.md byte for byte (BOM, UTF-16, CRLF files must stay as they are)
+# and generates two deterministic large files from readme.md:
+#   big-5mb.md    readme.md repeated until >= 5 MB, headings numbered per copy ("## 12. Features")
+#   huge-40mb.md  the same until >= 40 MB (exceeds the plugin's 32 MB read cap)
+function Write-RepeatedMarkdown([string]$Source, [string]$Path, [long]$MinBytes) {
+    $lines = [System.IO.File]::ReadAllLines($Source, [System.Text.Encoding]::UTF8)
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $sw = New-Object System.IO.StreamWriter($Path, $false, $utf8, 1MB)
+    try {
+        $sw.NewLine = "`n"
+        $copy = 0
+        while ($sw.BaseStream.Length -lt $MinBytes) {
+            $copy++
+            $inFence = $false
+            foreach ($line in $lines) {
+                if ($line -match '^\s{0,3}(```|~~~)') { $inFence = -not $inFence; $sw.WriteLine($line); continue }
+                if (-not $inFence -and $line -match '^(#{1,6}) (.*)$') { $sw.WriteLine("$($Matches[1]) $copy. $($Matches[2])"); continue }
+                $sw.WriteLine($line)
+            }
+            $sw.WriteLine('')
+            $sw.Flush()
+        }
+    } finally { $sw.Dispose() }
+}
+
+$mdSource = Join-Path (Split-Path -Parent $ScriptDir) 'testdata\markdown'
+$mdTarget = Join-Path $Target 'markdown'
+New-Item -ItemType Directory -Force -Path $mdTarget | Out-Null
+Copy-Item -Path (Join-Path $mdSource '*.md') -Destination $mdTarget -Force
+$readme = Join-Path $mdSource 'readme.md'
+Write-RepeatedMarkdown $readme (Join-Path $mdTarget 'big-5mb.md') (5MB)
+Write-RepeatedMarkdown $readme (Join-Path $mdTarget 'huge-40mb.md') (40MB)
+Write-Host ("markdown\: {0} files" -f @(Get-ChildItem -LiteralPath $mdTarget -File).Count)
+if ($MarkdownOnly) {
+    Get-ChildItem -LiteralPath $mdTarget -File | Format-Table Name, Length -AutoSize | Out-Host
+    Write-Host 'Done (markdown only).'
+    return
+}
 
 # --- disk space check ----------------------------------------------------------
 $drive = New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot($Target))
